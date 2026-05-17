@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kanban de Preparaciones</title>
+
+<style>
+body { font-family: Arial, sans-serif; margin: 0; background:#f5f7fa; color:#222; }
+header { background:#1f4e79; color:white; padding:20px; }
+.container { max-width: 1200px; margin: 20px auto; padding: 0 15px; }
+.controls { background:white; padding:15px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:20px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+input, select, textarea, button { font-size:14px; padding:8px; border-radius:8px; border:1px solid #ccc; }
+button { background:#1f4e79; color:white; cursor:pointer; border:none; }
+button:hover { opacity:.9; }
+.stats { display:flex; gap:15px; flex-wrap:wrap; margin:15px 0; }
+
+/* 🔝 Estadísticas siempre visibles */
+#stats {
+  position: sticky;
+  top: 0;
+  z-index: 999;
+  background: #f5f7fa;
+  padding: 10px 0;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+}
+
+.stat { background:white; padding:12px 16px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.08); }
+.order-card { background:white; border-radius:14px; padding:16px; margin-bottom:20px; box-shadow:0 2px 8px rgba(0,0,0,.08); }
+.progress { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin:8px 0 12px; }
+.progress > div { height:100%; background:#22c55e; }
+.item { border-radius:10px; padding:10px; margin:10px 0; }
+
+/* 🎨 Colores por estado */
+.item.pending {
+  background:#ffe5e5 !important;
+  border-left:6px solid #ff4d4d;
+}
+.item.in-progress {
+  background:#fff7d6 !important;
+  border-left:6px solid #f2c200;
+}
+.item.prepared {
+  background:#e6ffe9 !important;
+  border-left:6px solid #22c55e;
+}
+.item.incidence {
+  background:#ffe8d9 !important;
+  border-left:6px solid #ff7a00;
+}
+
+.item-header { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+.item-meta { color:#555; font-size:13px; margin-top:6px; }
+textarea { width:100%; min-height:50px; margin-top:8px; }
+.row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+.small { font-size:12px; color:#666; }
+
+/* 🏷️ Badge de lote */
+.badge-lote {
+  display:inline-block;
+  background:#1f4e79;
+  color:white;
+  padding:2px 8px;
+  border-radius:8px;
+  font-size:11px;
+  margin-bottom:6px;
+}
+
+/* 🔍 Buscador flotante */
+#searchFloating {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: #1f4e79;
+  color: white;
+  padding: 12px 16px;
+  border-radius: 50px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  font-size: 14px;
+  border: none;
+  z-index: 2000;
+}
+#searchFloating:focus { outline: none; }
+#searchFloating::placeholder { color: #e0e0e0; }
+</style>
+</head>
+
+<body>
+<header>
+  <h1>Kanban de Preparaciones de Materia Prima</h1>
+  <div>Control visual de lotes, operarios, observaciones e incidencias</div>
+</header>
+
+<div class="container">
+  <div class="controls">
+    <input type="file" id="fileInput" accept=".txt">
+    <button onclick="exportData()">Exportar estado</button>
+    <input type="file" id="importBackup" accept=".txt">
+    <button onclick="importBackup()">Importar estado</button>
+    <button onclick="localStorage.removeItem('kanbanPreparaciones'); location.reload();">Borrar datos</button>
+    <p class="small">Formato TXT delimitado por tabulaciones con columnas: Order, Item description, Ordered qty</p>
+  </div>
+
+  <div class="stats" id="stats"></div>
+  <div id="orders"></div>
+</div>
+
+<!-- 🔍 Buscador flotante -->
+<input type="text" id="searchFloating" placeholder="Buscar lote… (ENTER)">
+
+<script>
+let data = [];
+
+function normalizeStatus(s) {
+  return s || 'pending';
+}
+
+function parseTXT(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const headers = lines.shift().split('\t').map(h => h.trim().toLowerCase());
+
+  const orderIdx = headers.indexOf('order');
+  const itemIdx = headers.indexOf('item description');
+  const qtyIdx = headers.indexOf('ordered qty');
+
+  if (orderIdx < 0 || itemIdx < 0 || qtyIdx < 0) {
+    alert('No se encuentran las columnas requeridas.');
+    return;
+  }
+
+  data = lines.filter(l => l.trim()).map(line => {
+    const cols = line.split('\t');
+    return {
+      order: cols[orderIdx]?.trim() || '',
+      itemDescription: cols[itemIdx]?.trim() || '',
+      orderedQty: cols[qtyIdx]?.trim() || '',
+      status: 'pending',
+      operator: '',
+      notes: ''
+    };
+  });
+
+  save();
+  render();
+}
+
+document.getElementById('fileInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => parseTXT(ev.target.result);
+  reader.readAsText(file, 'utf-8');
+});
+
+function save() {
+  localStorage.setItem('kanbanPreparaciones', JSON.stringify(data));
+}
+
+function load() {
+  const saved = localStorage.getItem('kanbanPreparaciones');
+  if (saved) {
+    data = JSON.parse(saved);
+  }
+}
+
+function statusLabel(status) {
+  return {
+    pending: 'Pendiente',
+    'in-progress': 'En preparación',
+    prepared: 'Preparado',
+    incidence: 'Incidencia'
+  }[status] || 'Pendiente';
+}
+
+function reverseStatusLabel(label) {
+  const map = {
+    "Pendiente": "pending",
+    "En preparación": "in-progress",
+    "Preparado": "prepared",
+    "Incidencia": "incidence"
+  };
+  return map[label] || "pending";
+}
+
+function renderStats() {
+  const total = data.length;
+  const prepared = data.filter(d => d.status === 'prepared').length;
+  const pending = data.filter(d => d.status === 'pending').length;
+  const inProgress = data.filter(d => d.status === 'in-progress').length;
+  const incidence = data.filter(d => d.status === 'incidence').length;
+  const progress = total ? Math.round(prepared / total * 100) : 0;
+
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><strong>Total líneas:</strong> ${total}</div>
+    <div class="stat"><strong>Preparadas:</strong> ${prepared}</div>
+    <div class="stat"><strong>Pendientes:</strong> ${pending}</div>
+    <div class="stat"><strong>En preparación:</strong> ${inProgress}</div>
+    <div class="stat"><strong>Incidencias:</strong> ${incidence}</div>
+    <div class="stat"><strong>Avance global:</strong> ${progress}%</div>
+  `;
+}
+
+function render() {
+  renderStats();
+
+  const grouped = {};
+  data.forEach((row, index) => {
+    if (!grouped[row.order]) grouped[row.order] = [];
+    grouped[row.order].push({ ...row, index });
+  });
+
+  const container = document.getElementById('orders');
+  container.innerHTML = '';
+
+  Object.keys(grouped).sort().forEach(order => {
+    const items = grouped[order];
+    const prepared = items.filter(i => i.status === 'prepared').length;
+    const progress = Math.round(prepared / items.length * 100);
+
+    const card = document.createElement('div');
+    card.className = 'order-card';
+
+    card.innerHTML = `
+      <h2>Lote ${order}</h2>
+      <div>${prepared} de ${items.length} líneas preparadas (${progress}%)</div>
+      <div class="progress"><div style="width:${progress}%"></div></div>
+    `;
+
+    items.forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'item ' + normalizeStatus(item.status);
+
+      div.innerHTML = `
+        <div class="item-header">
+          <strong>${item.itemDescription}</strong>
+          <span>${item.orderedQty}</span>
+        </div>
+
+        <div class="badge-lote">Lote ${item.order}</div>
+
+        <div class="row">
+          <label>Estado:</label>
+          <select onchange="updateField(${item.index}, 'status', this.value)">
+            <option value="pending" ${item.status==='pending'?'selected':''}>Pendiente</option>
+            <option value="in-progress" ${item.status==='in-progress'?'selected':''}>En preparación</option>
+            <option value="prepared" ${item.status==='prepared'?'selected':''}>Preparado</option>
+            <option value="incidence" ${item.status==='incidence'?'selected':''}>Incidencia</option>
+          </select>
+
+          <label>Operario:</label>
+          <input type="text" value="${escapeHtml(item.operator || '')}"
+                 placeholder="Nombre del operario"
+                 onchange="updateField(${item.index}, 'operator', this.value)">
+        </div>
+
+        <div class="item-meta">
+          Estado actual: <strong>${statusLabel(item.status)}</strong>
+          ${item.operator ? ' | Operario: <strong>' + escapeHtml(item.operator) + '</strong>' : ''}
+        </div>
+
+        <label>Observaciones / Incidencias:</label>
+        <textarea onchange="updateField(${item.index}, 'notes', this.value)"
+                  placeholder="Escriba aquí cualquier observación, incidencia o comentario...">${escapeHtml(item.notes || '')}</textarea>
+      `;
+      card.appendChild(div);
+    });
+
+    container.appendChild(card);
+  });
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function updateField(index, field, value) {
+  data[index][field] = value;
+  save();
+  render();
+}
+
+function exportData() {
+  if (!data.length) {
+    alert('No hay datos para exportar.');
+    return;
+  }
+
+  const headers = ['Order', 'Item description', 'Ordered qty', 'Status', 'Operator', 'Notes'];
+  const rows = data.map(r => [
+    r.order,
+    r.itemDescription,
+    r.orderedQty,
+    statusLabel(r.status),
+    r.operator || '',
+    (r.notes || '').replace(/\r?\n/g, ' ')
+  ]);
+
+  const content = [headers, ...rows]
+    .map(row => row.join('\t'))
+    .join('\n');
+
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'estado_preparaciones.txt';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function importBackup() {
+  const file = document.getElementById("importBackup").files[0];
+  if (!file) {
+    alert("Seleccione un archivo TXT exportado previamente.");
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result.trim();
+    const lines = text.split(/\r?\n/);
+
+    const headers = lines.shift().split('\t').map(h => h.trim().toLowerCase());
+
+    if (!(
+      headers.includes("order") &&
+      headers.includes("item description") &&
+      headers.includes("ordered qty") &&
+      headers.includes("status") &&
+      headers.includes("operator") &&
+      headers.includes("notes")
+    )) {
+      alert("El archivo no parece ser un backup válido exportado desde esta aplicación.");
+      return;
+    }
+
+    data = lines.filter(l => l.trim()).map(line => {
+      const cols = line.split('\t');
+      return {
+        order: cols[0] || "",
+        itemDescription: cols[1] || "",
+        orderedQty: cols[2] || "",
+        status: reverseStatusLabel(cols[3] || "Pendiente"),
+        operator: cols[4] || "",
+        notes: cols[5] || ""
+      };
+    });
+
+    save();
+    render();
+    alert("Estado restaurado correctamente.");
+  };
+
+  reader.readAsText(file, "utf-8");
+}
+
+/* 🔍 Búsqueda flotante con ENTER */
+document.getElementById("searchFloating").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") {
+    buscarLote(this.value.trim());
+  }
+});
+
+function buscarLote(valor) {
+  if (!valor) return;
+
+  const cards = document.querySelectorAll('.order-card');
+  let encontrado = false;
+
+  cards.forEach(card => {
+    const titulo = card.querySelector('h2')?.textContent || '';
+    if (titulo.toLowerCase().includes(valor.toLowerCase())) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      card.style.boxShadow = "0 0 15px #1f4e79";
+      setTimeout(() => card.style.boxShadow = "", 2000);
+      encontrado = true;
+    }
+  });
+
+  if (!encontrado) {
+    alert("No se encontró el lote " + valor);
+  }
+}
+
+load();
+render();
+</script>
+</body>
+</html>
